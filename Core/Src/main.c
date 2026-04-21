@@ -1,5 +1,5 @@
 /* USER CODE BEGIN Header */
-/**
+/* Nicolas Prata 2026
  * For loopback mode, since Rx and Tx are only internally linked,
  * monitor Tx signal (PB9) at the logic analyser (Rx is still)
   ******************************************************************************
@@ -25,9 +25,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
-// Blinking blue led is the "heartbeat" of the system
-      	GPIOK->ODR ^= GPIO_ODR_OD3; //toggle PK3 (bleu)
- }
+	// Blinking blue led is the "heartbeat" of the system
+	GPIOK->ODR ^= GPIO_ODR_OD3; //toggle PK3 (bleu)
+}
 
 /* USER CODE END PD */
 
