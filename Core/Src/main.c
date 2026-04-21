@@ -25,12 +25,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
-      EXTI->PR = (1U<<22);// This bit is set when the selected edge event arrives on the external interrupt line. This bit is cleared by programming it to ‘1’.
-//      if((RTC->ISR & RTC_ISR_WUTF)!=0) // (1U<<10 WUTF: this flag is set by hardware when the wakeup auto-reload counter reaches 0.
-//      {									// 1: Wakeup timer configuration update allowed
+// Blinking blue led is the "heartbeat" of the system
       	GPIOK->ODR ^= GPIO_ODR_OD3; //toggle PK3 (bleu)
-      	//RTC->ISR = ~RTC_ISR_WUTF; // (0U<<10); this flag is cleared by software by writing 0
-     // }
  }
 
 /* USER CODE END PD */
