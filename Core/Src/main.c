@@ -14,7 +14,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
+#include "myFirst_adc.h"
+#include <usb_cdc_fs.h>
+#include "myConfig.h"
+#include "timers.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -24,10 +29,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
-	// Blinking blue led is the "heartbeat" of the system
-	GPIOK->ODR ^= GPIO_ODR_OD3; //toggle PK3 (bleu)
-}
 
 /* USER CODE END PD */
 
@@ -51,6 +52,13 @@ uint32_t              TxMailbox;
 CAN_RxHeaderTypeDef   RxHeader;
 uint8_t               RxData[8];
 //
+uint16_t val[2], valAVG[2], avg1 = 0, avg2 = 0, oldval[2] ; // PV for pots 10K
+uint16_t adc_buff[2];
+uint8_t cntAVG = 0; // poti
+uint32_t start, duree_ns;
+uint32_t ct = 0;
+volatile uint8_t flag_canTx = 0;
+volatile uint32_t ep1_epena_status; // Use volatile so the debugger always sees the real value
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -70,25 +78,25 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
 	/*	Once the interrupt occurs, the callback function HAL_CAN_RxFifo0MsgPendingCallback is called.
 		In this function, we retrieve the received message header and data, and perform further checks if required.
-	*/
-  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if ((RxHeader.StdId == 0x103))
-  {
-	 // datacheck = 1; // in main loop
-  }
+	 */
+	//GPIOD->ODR^=GPIO_ODR_OD4; // orange
+	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) flag_canTx = 1;
+	else {
+		flag_canTx = 0;
+		Error_Handler();
+	}
 }
 
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan) {
+
     // Process "Priority" messages here
 }
 
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 {
+	HAL_UART_Transmit(&huart3, (uint8_t *)"error", 6, 10);
     uint32_t error = HAL_CAN_GetError(hcan);
-
+	 HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_4);
     // 1. Check for ACK Error (Most common)
     if (error & HAL_CAN_ERROR_ACK) {
         // No one is acknowledging your message!
@@ -106,6 +114,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     }
 }
 
+
 /* USER CODE END 0 */
 
 /**
@@ -117,67 +126,21 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
 
-	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.StdId = 0x469;
+	// Initialization
+//	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+//	DWT->CYCCNT = 0;
+//	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+//	TxHeader.IDE = CAN_ID_STD;
+//	TxHeader.StdId = 0x469;
 	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 3;
+//	TxHeader.DLC = 3;
+//
+//	TxData[0] = 0x50;
+//	TxData[1] = 0xAA;
+//	TxData[2] = 0x86;
 
-	TxData[0] = 0x50;
-	TxData[1] = 0xAA;
-	TxData[2] = 0x86;
 
-	CAN_FilterTypeDef filtercfg;
-
-	/*When a message arrives, the hardware checks it against the active filter banks.*/
-	// --- CONFIGURING BANK 0 ---
-	filtercfg.FilterActivation = CAN_FILTER_ENABLE;
-	filtercfg.SlaveStartFilterBank = 10;  // how many filters to assign to the CAN1 (master can)
-	filtercfg.FilterBank = 0;  // which filter bank to use from the assigned ones
-	filtercfg.FilterFIFOAssignment = CAN_FILTER_FIFO0; // decide which FIFO (FIFO0 or FIFO1) will store received messages (related interrupt is enabled)
-	filtercfg.FilterScale = CAN_FILTERSCALE_32BIT; // use either one 32-bit register or two 16-bit registers.
-	filtercfg.FilterMode = CAN_FILTERMODE_IDMASK;
-	// In Mask mode, FilterIdHigh is the Target ID. It defines what the bits should look like. The FilterMaskIdHigh then defines which of those bits are mandatory.
-	// It List Mode, it is simply ID #1. In this mode, there is no mask. FilterIdHigh is the first ID you want to allow, and FilterMaskIdHigh is actually a second ID you want to allow.
-	filtercfg.FilterIdHigh = 0x446 << 5; // Holds the upper 16 bits of the filter. In 32-bit Filter Mode, the first 5 bits of that register are used for RTR, IDE, etc.
-	filtercfg.FilterIdLow = 0;
-	filtercfg.FilterMaskIdHigh = 0x446<<5; // define which ID bits to compare (e.g., shift the STD ID by 5 because it starts at bit 5).
-	filtercfg.FilterMaskIdLow = 0x7FF << 5; // Check all 11 bits, catch only 0x446 ID
-	HAL_CAN_ConfigFilter(&hcan1, &filtercfg);
-
-	// --- CONFIGURING BANK 1 (if needed) to FIFO1 ---
-	filtercfg.SlaveStartFilterBank = 1;  // how many filters to assign to the CAN1 (master can)
-	filtercfg.FilterBank = 1;  // which filter bank to use from the assigned ones
-	filtercfg.FilterFIFOAssignment = CAN_FILTER_FIFO1; // decide which FIFO (FIFO0 or FIFO1) will store received messages (related interrupt is enabled)
-	filtercfg.FilterScale = CAN_FILTERSCALE_32BIT; // use either one 32-bit register or two 16-bit registers.
-	filtercfg.FilterMode = CAN_FILTERMODE_IDMASK;
-	filtercfg.FilterIdHigh = 0x100 << 5; // Binary: 001 0000 0000
-	filtercfg.FilterIdLow = 0;
-	filtercfg.FilterMaskIdHigh = 0xFF0 << 5; // Binary: 111 1111 0000 -> The filter  will accept 0x100, 0x101, 0x102 up to 0x10F.
-	filtercfg.FilterMaskIdLow = 0x0000;
-	HAL_CAN_ConfigFilter(&hcan1, &filtercfg);
-
-/*1. In Mask Mode (Identifier Mask)
-This is the default for most people. Here, FilterIdHigh is the Target, and FilterMaskIdHigh is the Constraint.
-    FilterIdHigh: "I am looking for 0x123."
-    FilterMaskIdHigh: "I want you to check every single bit of that ID (0x7FF)."
-    Result: You get exactly one ID.
-
-2. In List Mode (Identifier List)
-In this mode, there is no mask. The hardware stops acting like a "bit-checker" and starts acting like a "phone book." It treats both registers as independent IDs.
-    FilterIdHigh: "Accept ID 0x123."
-    FilterMaskIdHigh: "Also accept ID 0x456."
-    Result: You get two specific IDs per filter bank, but you have no way to use a "wildcard" (mask) to catch a range.
-
-Why the naming is confusing
-The HAL uses the variable name FilterMaskIdHigh regardless of which mode you are in.
-    In Mask Mode, that variable is a bit-mask.
-    In List Mode, that variable is actually a second ID.
-
-How to decide which to use?
-If you want to...	Use this Mode	Setup
-Catch one specific ID	Mask Mode	ID = 0x123, Mask = 0x7FF
-Catch a group of IDs (e.g., 0x100 to 0x10F)	Mask Mode	ID = 0x100, Mask = 0xFF0
-Catch two unrelated IDs in one bank	List Mode	ID1 = 0x123, ID2 = 0x456*/
 
   /* USER CODE END 1 */
 
@@ -187,7 +150,6 @@ Catch two unrelated IDs in one bank	List Mode	ID1 = 0x123, ID2 = 0x456*/
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
 
   /* USER CODE END Init */
 
@@ -202,38 +164,88 @@ Catch two unrelated IDs in one bank	List Mode	ID1 = 0x123, ID2 = 0x456*/
   MX_GPIO_Init();
   MX_CAN1_Init();
   MX_RTC_Init();
-  MX_USART3_UART_Init();
-  if (HAL_CAN_ActivateNotification(&hcan1, // --- TX Interrupts ---
-		    //CAN_IT_TX_MAILBOX_EMPTY |       // Transmit mailbox becomes empty
-		    // --- RX Interrupts ---
-		    CAN_IT_RX_FIFO0_MSG_PENDING |  // New message in FIFO 0
-			CAN_IT_RX_FIFO1_MSG_PENDING
-		    // CAN_IT_RX_FIFO0_FULL |          // FIFO 0 is full
-		    // CAN_IT_RX_FIFO1_MSG_PENDING |   // New message in FIFO 1
-		    // --- Status Change / Error (SCE) Interrupts ---
-		    // CAN_IT_ERROR_WARNING |          // Error counter > 96
-		    // CAN_IT_ERROR_PASSIVE |          // Error counter > 127
-		    // CAN_IT_BUSOFF |                 // Bus-Off state (counter > 255)
-		    // CAN_IT_LAST_ERROR_CODE |        // Type of last error (ACK, Stuff, etc)
-			// CAN_IT_ERROR                    // Global Error) != HAL_OK)
-			) != HAL_OK) {
- 	  Error_Handler();
-   }
-
-
+  //MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 
+
+	/**** ADC INIT FOR SENSORS AND POTS ****/
+  ADC1_Base_Init(); // Init the ADC for stm sensors and the two pots
+  ADC1_Potentiometers_DMA_Init((uint32_t )&ADC1->DR, (uint32_t)adc_buff, 2); //  (uint32_t)adc_buff -> do it better
   HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);
   HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_4);
+  HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
+
+  CAN_FilterTypeDef filtercfg; 	/*When a message arrives, the hardware checks it against the active filter banks.*/
+
+  // --- CONFIGURING BANK 0 - only AFTER MX_CAN1_Init()  ---
+  filtercfg.FilterActivation = CAN_FILTER_ENABLE;
+  filtercfg.SlaveStartFilterBank = 10;  // how many filters to assign to the CAN1 (master can)
+  filtercfg.FilterBank = 0;  // which filter bank to use from the assigned ones
+  filtercfg.FilterFIFOAssignment = CAN_FILTER_FIFO0; // decide which FIFO (FIFO0 or FIFO1) will store received messages (related interrupt is enabled)
+  filtercfg.FilterScale = CAN_FILTERSCALE_32BIT; // use either one 32-bit register or two 16-bit registers.
+  filtercfg.FilterMode = CAN_FILTERMODE_IDMASK;
+  // In Mask mode, FilterIdHigh is the Target ID. It defines what the bits should look like. The FilterMaskIdHigh then defines which of those bits are mandatory.
+  // It List Mode, it is simply ID #1. In this mode, there is no mask. FilterIdHigh is the first ID you want to allow, and FilterMaskIdHigh is actually a second ID you want to allow.
+  filtercfg.FilterIdHigh = 0; // 0x446 << 5 Holds the upper 16 bits of the filter. In 32-bit Filter Mode, the first 5 bits of that register are used for RTR, IDE, etc.
+  filtercfg.FilterIdLow = 0;
+  filtercfg.FilterMaskIdHigh = 0; // define which ID bits to compare (e.g., shift the STD ID by 5 because it starts at bit 5).
+  filtercfg.FilterMaskIdLow = 0; //  0x7FF << 5 Check all 11 bits, catch only 0x469 ID
+  HAL_CAN_ConfigFilter(&hcan1, &filtercfg);
+
+  // --- CONFIGURING BANK 1 (if needed) to FIFO1 ---
+  filtercfg.FilterBank = 1;  // which filter bank to use from the assigned ones
+  filtercfg.FilterFIFOAssignment = CAN_FILTER_FIFO1; // decide which FIFO (FIFO0 or FIFO1) will store received messages (related interrupt is enabled)
+  filtercfg.FilterScale = CAN_FILTERSCALE_32BIT; // use either one 32-bit register or two 16-bit registers.
+  filtercfg.FilterMode = CAN_FILTERMODE_IDMASK;
+  filtercfg.FilterIdHigh = 0x100 << 5; // Binary: 001 0000 0000
+  filtercfg.FilterIdLow = 0;
+  filtercfg.FilterMaskIdHigh = 0 << 5; // 0xFF0 Binary: 111 1111 0000 -> The filter  will accept 0x100, 0x101, 0x102 up to 0x10F.
+  filtercfg.FilterMaskIdLow = 0x0000;
+  HAL_CAN_ConfigFilter(&hcan1, &filtercfg);
+
+  /*1. In Mask Mode (Identifier Mask)
+  This is the default for most people. Here, FilterIdHigh is the Target, and FilterMaskIdHigh is the Constraint.
+      FilterIdHigh: "I am looking for 0x123."
+      FilterMaskIdHigh: "I want you to check every single bit of that ID (0x7FF)."
+      Result: You get exactly one ID.
+
+  2. In List Mode (Identifier List)
+  In this mode, there is no mask. The hardware stops acting like a "bit-checker" and starts acting like a "phone book." It treats both registers as independent IDs.
+      FilterIdHigh: "Accept ID 0x123."
+      FilterMaskIdHigh: "Also accept ID 0x456."
+      Result: You get two specific IDs per filter bank, but you have no way to use a "wildcard" (mask) to catch a range.
+
+  Why the naming is confusing
+  The HAL uses the variable name FilterMaskIdHigh regardless of which mode you are in.
+      In Mask Mode, that variable is a bit-mask.
+      In List Mode, that variable is actually a second ID.
+
+  How to decide which to use?
+  If you want to...	Use this Mode	Setup
+  Catch one specific ID	Mask Mode	ID = 0x123, Mask = 0x7FF
+  Catch a group of IDs (e.g., 0x100 to 0x10F)	Mask Mode	ID = 0x100, Mask = 0xFF0
+  Catch two unrelated IDs in one bank	List Mode	ID1 = 0x123, ID2 = 0x456*/
+
+  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
 
   // 1. Start the CAN peripheral - This moves it from INIT to NORMAL mode
   if (HAL_CAN_Start(&hcan1) != HAL_OK)
   {
 	  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_4);
-      Error_Handler();
+	  Error_Handler();
   }
+  TxHeader.StdId = 0x470;
+  TxHeader.RTR = 0;
+  TxHeader.DLC = 4;
 
+  //SysClockConfig();
+  //GPIO_Config();
+  //InterruptGPIO_Config();
 
+  if(USB_OTG_FS_Init() != EP_OK) return -1;
+
+  HAL_Delay(5000); //Delay wait for USB detection by Host
 
   /* USER CODE END 2 */
 
@@ -241,17 +253,78 @@ Catch two unrelated IDs in one bank	List Mode	ID1 = 0x123, ID2 = 0x456*/
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-		if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) == HAL_OK)
-		{
-			HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);
+	  //start = DWT->CYCCNT; // Start Measurement; polling = 1,223,027ns -
+	  //char arr1[4], arr2[4];
+	  uint16_t val[2], valAVG[2];
+	  val[0] = ((adc_buff[0] + 5) / 82); // sufficient once every 5ms
+	  val[1] = ((adc_buff[1] + 5) / 82);
+	  avg1 = avg1 + val[0]; // despite capacitor 1µF on potentiometer, values displayed still unstable
+	  avg2 = avg2 + val[1]; // doing a short averaging on the last 5 ADC values
+	  cntAVG++;
+	  // every 25ms look if the potentiometer was rotated (sufficient for smooth operation)
+	  if(cntAVG == 5) {
+		  valAVG[0] = avg1 / 5; // averaged over 5 values only
+		  valAVG[1] = avg2 / 5;
+		  avg1 = avg2 = cntAVG = 0;
+		  uint8_t leftChg = (valAVG[0] < oldval[0]) || (valAVG[0] > oldval[0]); // detected value change
+		  uint8_t rightChg = (valAVG[1] < oldval[1]) || (valAVG[1] > oldval[1]);
 
-		}
+		  if(leftChg || rightChg)
+		  {
+			  //arr1[2] = 0; arr2[2] = 0;
+			  //int len1 = 0; int len2 = 0;
+			  if(leftChg) {
 
-		HAL_Delay(1000);
+				  TxHeader.StdId = 0x469;
+				  TxHeader.RTR = 0;
+				  TxHeader.DLC = 8;
+				  for(int i=0; i < 8; i++) { TxData[i] = valAVG[0]; }
+			  }
+			  if(rightChg) {
+				  TxHeader.StdId = 0x470;
+				  TxHeader.RTR = 0;
+				  TxHeader.DLC = 8;
+				  for(int i=0; i < 8; i++){ TxData[i] = valAVG[1]; }
+			  }
+		  }
+		  oldval[0] = valAVG[0];
+		  oldval[1] = valAVG[1];
+	  }
 
-    /* USER CODE END WHILE */
+		  if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) == HAL_OK) {}
 
-    /* USER CODE BEGIN 3 */
+		  char msg[20] = {0}; // Buffer for the string
+		  msg[0] = 0x02;
+		  // To send it "human-readable" over Uart:
+//		  int len = sprintf(msg, "RX ID: 0x%03lX DLC: %ld Data: ", RxHeader.StdId, RxHeader.DLC); // Format the Header info (ID and Data Length)
+//			  for (int i = 0; i < RxHeader.DLC; i++) {			// Append the Data bytes in Hex
+//				len += sprintf(msg + len, "%02X ", RxData[i]);
+//			  }
+		  memcpy(&msg[1], (uint8_t *)&(RxHeader.StdId), 2);
+		  memcpy(&msg[3], (uint8_t *)&(RxHeader.RTR), 1);
+		  memcpy(&msg[4], (uint8_t *)&RxHeader.DLC, 1);
+		  int len = RxHeader.DLC;
+		  memcpy(&msg[5], RxData, len);
+		  msg[5 + len] = 0x0A; // eof character (the "\n")
+		  //HAL_UART_Transmit(&huart3, (uint8_t *)msg, 6 + len, 2); //Transmit the whole string
+
+
+	  if(ct == 10 && flag_canTx == 1) {
+		  flag_canTx = 0;
+		 ct = 0;
+
+		  if(USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len) == EP_OK) // Echo data
+		  {  HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);  } // Green
+	  }
+
+	  ct++;
+
+	  NBdelay_ms(100);
+
+
+	  /* USER CODE END WHILE */
+
+	  /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
@@ -328,11 +401,11 @@ static void MX_CAN1_Init(void)
 
   /* USER CODE END CAN1_Init 1 */
   hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 75;
+  hcan1.Init.Prescaler = 25;
   hcan1.Init.Mode = CAN_MODE_LOOPBACK;
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_3TQ;
-  hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_14TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_3TQ;
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
@@ -466,14 +539,14 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOK_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(Blue_Led_GPIO_Port, Blue_Led_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(Bleu_Led_GPIO_Port, Bleu_Led_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(Orange_Led_GPIO_Port, Orange_Led_Pin, GPIO_PIN_RESET);
@@ -481,12 +554,12 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(Green_Led_GPIO_Port, Green_Led_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : Blue_Led_Pin */
-  GPIO_InitStruct.Pin = Blue_Led_Pin;
+  /*Configure GPIO pin : Bleu_Led_Pin */
+  GPIO_InitStruct.Pin = Bleu_Led_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(Blue_Led_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(Bleu_Led_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : Orange_Led_Pin */
   GPIO_InitStruct.Pin = Orange_Led_Pin;
