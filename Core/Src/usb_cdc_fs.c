@@ -489,6 +489,23 @@ static inline void set_FIFOs_sz(){
 *
 ***************************************************/
 
+/**
+* brief  Change EP OUT status
+* param  EP number
+* param  READY/BUSY
+*/
+static inline void toggle_Rx_EP_Status(uint8_t EPnum, uint8_t param){
+	if(EndPoint[EPnum].statusRx == param) return;
+	EndPoint[EPnum].statusRx = param; /* toggle status*/
+
+		if(param==EP_READY){
+			USB_EP_OUT(EPnum)->DOEPCTL |= (USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_EPENA);
+	}
+		else{
+			USB_EP_OUT(EPnum)->DOEPCTL |= USB_OTG_DOEPCTL_SNAK;
+		}
+}
+
 static void Get_ID_To_String(uint8_t *dest) {
 	// Pointer to the UID start address (Adjust for your specific STM32)
 	uint32_t *id_ptr = (uint32_t *)0x1FFF7A10; // The 96-bit Unique ID (UID)
@@ -592,7 +609,6 @@ static void USB_CDC_Config_Hardware(void) {
     USB_EP_IN(1)->DIEPCTL |= USB_OTG_DIEPCTL_CNAK;
 }
 
-
  /**
  * brief  Flush TxFifo
  * param  Fifo number, 10 = all Tx Fifos,
@@ -615,7 +631,6 @@ uint32_t USB_FlushTxFifo(uint32_t EPnum, uint32_t timeout){
  /**
  * brief  Flush RxFifo
  * param  timeout (default FLUSH_FIFO_TIMEOUT)
- * param
  * retval 1 = OK, 0 = Failed
  */
 uint32_t USB_FlushRxFifo(uint32_t timeout){
@@ -632,30 +647,9 @@ uint32_t USB_FlushRxFifo(uint32_t timeout){
 }
 
 
- /**
- * brief  Change EP OUT status
- * brief
- * param  EP number
- * param  READY/BUSY
- * retval
- */
-static inline void toggle_Rx_EP_Status(uint8_t EPnum, uint8_t param){
-	if(EndPoint[EPnum].statusRx == param) return;
- 	EndPoint[EPnum].statusRx = param; /* toggle status*/
-
- 		if(param==EP_READY){
- 			USB_EP_OUT(EPnum)->DOEPCTL |= (USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_EPENA);
- 	}
- 		else{
- 			USB_EP_OUT(EPnum)->DOEPCTL |= USB_OTG_DOEPCTL_SNAK;
- 		}
-}
-
-
 /**
 * brief  Write data into DFIFO
 * param  EP number, TX Buffer, length
-* param
 * retval OK or FAILED (in case DFIFO overrun, for better details watch my youtube)
 */
 uint32_t write_Fifo(uint8_t dfifo, uint8_t *src, uint16_t len){
@@ -704,6 +698,53 @@ uint32_t write_Fifo(uint8_t dfifo, uint8_t *src, uint16_t len){
 	return EP_OK;
 }
 
+
+void read_Fifo(uint8_t dfifo, uint16_t len) {
+
+ 	/* The STM USB peripheral is "word-aligned" (32-bit). This means you cannot just read 1 byte at a time from the hardware;
+		you must read in 4-byte chunks. This check if the total byte count is a perfect multiple of 4.
+		If there is a remainder (e.g., you received 5 bytes), you still need to perform an extra 32-bit read to get those trailing bytes*/
+
+	uint32_t word_count = (len + 3) >> 2;  // represents the number of 32-bit read operations required to empty the FIFO for that specific packet.
+	uint8_t *dest = EndPoint[dfifo].rxBuffer_ptr;
+
+	// --- Safety Check (Wrap-around logic) - if unprocessed data length exceeds Max buffer length, it has to be rewritten
+	if ((dfifo == 1) && ((EndPoint[dfifo].rxCounter + len) > RX_BUFFER_EP1_SIZE)) {
+		dest = rxBufferEp1;
+		EndPoint[dfifo].rxCounter = 0;
+	}
+
+	for (uint32_t i = 0; i < word_count; i++) {
+		uint32_t temp_word = USB_OTG_DFIFO(0); // one global, single shared Rx FIFO
+
+		// If this is NOT the last word, copy all 4 bytes
+		if (i < (word_count - 1)) {
+			memcpy(dest, &temp_word, 4);
+			dest += 4;
+		}
+		else {
+			// This is the LAST word. Only copy the remaining bytes (1 to 4)
+			// This prevents overwriting memory outside your buffer!
+			uint8_t bytes_left = len - (i * 4);
+			memcpy(dest, &temp_word, bytes_left);
+			dest += bytes_left;
+		}
+	}
+
+	/* After you empty the hardware FIFO, the endpoint is "paused." To receive the next packet from the PC, you must:
+	    CNAK (Clear NAK): Tell the hardware it’s okay to accept more data (stop saying "Busy" to the host).
+	    EPENA (Endpoint Enable): Re-arm the endpoint for the next transfer.*/
+	if (dfifo != 0) {
+		// DOEPTSIZ = OUT endpoint x transfer size register. The application must modify this register before enabling the endpoint.
+		USB_EP_OUT(dfifo)->DOEPTSIZ = (1 << 19) | 64; // PKTCNT=1, XFRSIZ=64
+		USB_EP_OUT(dfifo)->DOEPCTL |= (USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_EPENA);  // --- Re-arm Endpoint ---
+		/*
+		  Even though the loop copied data in 4-byte blocks (which might have been more than the actual data), these lines "correct" the pointer.
+	   	It moves the pointer forward by exactly len (the actual number of bytes received), so the next packet starts exactly where this one ended.*/
+		EndPoint[dfifo].rxBuffer_ptr = dest; // only for EP > 0 !
+		EndPoint[dfifo].rxCounter += len;
+	}
+}
 
 /****************************************************
 * 		EndPoints' Callbacks*
@@ -854,19 +895,13 @@ uint32_t USB_CDC_transferRXCallback_EP0(uint32_t param){
 	return EP_OK;
 }
 
-
-
 /**
 * brief  Perform some action with received data (EP1) and refresh EP buffer counter
 * param  a command or a dummy param
-* param
-* retval
 */
 uint32_t USB_CDC_transferRXCallback_EP1(uint32_t param){
 
 	if(EndPoint[1].statusRx == EP_BUSY) return EP_FAILED;
-
-	//	toggle_Rx_EP_Status(1, EP_BUSY);
 
  	uint16_t len = EndPoint[1].rxCounter;
 
@@ -1398,101 +1433,25 @@ void OTG_FS_IRQHandler(){
 	        USB_OTG_FS->GRXSTSP is the "Portal" to this list. Reading GRXSTSP is the "Pop": the moment the code executes temp = USB_OTG_FS->GRXSTSP,
 	        the hardware physically removes the top entry from that internal list and slides the next one up.	*/
 
-			// 2. Handle SETUP Data (pktsts 6)
+	        // 2. Handle SETUP Data (pktsts 6)
 	        if (pktsts == 0x06) {
-	            // Read exactly 8 bytes (2 words) for the SETUP packet
-	            // This is your original read_Setup_Fifo() logic, but inline
-	            uint32_t *dest = (uint32_t *)rxBufferEp0;
-	            dest[0] = USB_OTG_DFIFO(0);
-	            dest[1] = USB_OTG_DFIFO(0);
+	        	// Read exactly 8 bytes (2 words) for the SETUP packet
+	        	// This is your original read_Setup_Fifo() logic, but inline
+	        	uint32_t *dest = (uint32_t *)rxBufferEp0;
+	        	dest[0] = USB_OTG_DFIFO(0);
+	        	dest[1] = USB_OTG_DFIFO(0);
 
-	            // Immediately fill your setup union
-	            memcpy(setup_pkt_data.raw_data, rxBufferEp0, 8);
+	        	// Immediately fill your setup union
+	        	memcpy(setup_pkt_data.raw_data, rxBufferEp0, 8);
 	        }
 	        // 3. Handle OUT Data (pktsts 2)
 	        else if (pktsts == 0x02) {
-	            if (bcnt > 0) {
-	                uint32_t word_count = (bcnt + 3) / 4;
-	                uint32_t *dest = (EpNum == 0) ? (uint32_t *)rxBufferEp0 : (uint32_t *)rxBufferEp1;
-	                for (uint16_t i = 0; i < word_count; i++) {
-	                    dest[i] = USB_OTG_DFIFO(EpNum);
-	                }
-	            }
+	        	if (bcnt > 0)
+	        		read_Fifo(EpNum, bcnt);
 	        }
-	        // 4. Handle COMPLETION (pktsts 3 or 4): clears the 'Status' phase that was likely causing the 19-click leak/crash
-	        /* With this block, you are finally acknowledging the "Transfer Complete" entries that the host sends after
-	           every Line Coding update. This keeps the hardware status queue empty. */
-	        else if (pktsts == 0x03 || pktsts == 0x04) {
-	            if (EndPoint[EpNum].rxCallBack != NULL) {
-	                // Call your 1-argument callback
-	                EndPoint[EpNum].rxCallBack(EpNum);
-	            }
-	        }
+
 	        // If pktsts is anything else (like Global OUT NAK), we've already popped it with the read of GRXSTSP, so we just move on.
 	    }
 	}
 }
 
-
-
-
-
-
-
-
-/*	NO LONGER NEEDED !
-
-    void read_Setup_Fifo(){
-	// Read Setup packet. Always 8 bytes (2 words) from the FIFO
-	uint32_t first_word = USB_OTG_DFIFO(0);
-	uint32_t second_word = USB_OTG_DFIFO(0);
-
-	setup_pkt_data.raw_data[0] = first_word;
-	setup_pkt_data.raw_data[1] = second_word;
-	}
-
-
-    void read_Fifo(uint8_t dfifo, uint16_t len){
-
-	 The STM USB peripheral is "word-aligned" (32-bit). This means you cannot just read 1 byte at a time from the hardware;
-		you must read in 4-byte chunks. This check if the total byte count is a perfect multiple of 4.
-		If there is a remainder (e.g., you received 5 bytes), you still need to perform an extra 32-bit read to get those trailing bytes
-
-	uint32_t word_count = (len + 3) >> 2;  // represents the number of 32-bit read operations required to empty the FIFO for that specific packet.
-	uint8_t *dest = EndPoint[dfifo].rxBuffer_ptr;
-
-	// --- Safety Check (Wrap-around logic) - if unprocessed data length exceeds Max buffer length, it has to be rewritten
-	if ((dfifo == 1) && ((EndPoint[dfifo].rxCounter + len) > RX_BUFFER_EP1_SIZE)) {
-		dest = rxBufferEp1;
-		EndPoint[dfifo].rxCounter = 0;
-	}
-
-	for (uint32_t i = 0; i < word_count; i++) {
-		uint32_t temp_word = USB_OTG_DFIFO(0);
-
-		// If this is NOT the last word, copy all 4 bytes
-		if (i < (word_count - 1)) {
-			memcpy(dest, &temp_word, 4);
-			dest += 4;
-		}
-		else {
-			// This is the LAST word. Only copy the remaining bytes (1 to 4)
-			// This prevents overwriting memory outside your buffer!
-			uint8_t bytes_left = len - (i * 4);
-			memcpy(dest, &temp_word, bytes_left);
-			dest += bytes_left;
-		}
-	}
-		After you empty the hardware FIFO, the endpoint is "paused." To receive the next packet from the PC, you must:
-	    CNAK (Clear NAK): Tell the hardware it’s okay to accept more data (stop saying "Busy" to the host).
-	    EPENA (Endpoint Enable): Re-arm the endpoint for the next transfer.
-	if (dfifo != 0) {
-		// DOEPTSIZ = OUT endpoint x transfer size register. The application must modify this register before enabling the endpoint.
-		USB_EP_OUT(dfifo)->DOEPTSIZ = (1 << 19) | 64; // PKTCNT=1, XFRSIZ=64
-		USB_EP_OUT(dfifo)->DOEPCTL |= (USB_OTG_DOEPCTL_CNAK | USB_OTG_DOEPCTL_EPENA);  // --- Re-arm Endpoint ---
-	}
-		Even though the loop copied data in 4-byte blocks (which might have been more than the actual data), these lines "correct" the pointer.
-	   	It moves the pointer forward by exactly len (the actual number of bytes received), so the next packet starts exactly where this one ended.
-	EndPoint[dfifo].rxBuffer_ptr = dest;
-	EndPoint[dfifo].rxCounter += len;
-}	*/

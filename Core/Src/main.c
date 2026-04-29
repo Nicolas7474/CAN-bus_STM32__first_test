@@ -59,6 +59,12 @@ uint32_t start, duree_ns;
 uint32_t ct = 0;
 volatile uint8_t flag_canTx = 0;
 volatile uint32_t ep1_epena_status; // Use volatile so the debugger always sees the real value
+volatile int flagRx = 0; // 0 = no data, 1 = data arrived
+
+// Buffers
+ uint8_t dest[USB_CDC_CIRC_BUFFER_SIZE] __attribute__ ((aligned (4))); // Align buffer 4-byte in RAM (or the memcpy and FIFO-write functions will be slower)
+ circBufferAddress getData; // you can make it global for debug purposes
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -112,6 +118,12 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     if (error & (HAL_CAN_ERROR_STF | HAL_CAN_ERROR_FOR)) {
         // Physical layer noise or baud rate mismatch.
     }
+}
+
+uint32_t USB_CDC_UserRxCallBack_EP1(uint16_t length){
+
+	flagRx = 1; // flag is raised when bytes are received
+	return EP_OK;
 }
 
 
@@ -239,6 +251,8 @@ int main(void)
   TxHeader.RTR = 0;
   TxHeader.DLC = 4;
 
+
+
   //SysClockConfig();
   //GPIO_Config();
   //InterruptGPIO_Config();
@@ -253,6 +267,17 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  if (flagRx == 1) {
+		  flagRx = 0;
+		  GPIOD->ODR^=GPIO_ODR_OD4;
+		  getData = read_circBufferRx(512);
+		  if (getData.len == 0)
+			  break;
+		  memcpy(dest, &circBufferRx[getData.index], getData.len); // copy in intermediate buffer, must be identical
+		  if(USB_CDC_UserSend_Data(dest, getData.len) != EP_OK) // Echo data
+			  USB_CDC_UserSend_Data(dest, getData.len); // maybe try again (can loop perpetually if no counting limit)
+	  }
+
 	  //start = DWT->CYCCNT; // Start Measurement; polling = 1,223,027ns -
 	  //char arr1[4], arr2[4];
 	  uint16_t val[2], valAVG[2];
@@ -313,8 +338,8 @@ int main(void)
 		  flag_canTx = 0;
 		 ct = 0;
 
-		  if(USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len) == EP_OK) // Echo data
-		  {  HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);  } // Green
+//		  if(USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len) == EP_OK) // Echo data
+//		  {  HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);  } // Green
 	  }
 
 	  ct++;

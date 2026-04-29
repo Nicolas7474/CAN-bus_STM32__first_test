@@ -183,6 +183,7 @@ void enumerate_Setup(void);
 // void initEndPoints(void); -> static
 
 /* FIFO access */
+void read_Fifo(uint8_t dfifo, uint16_t len);
 uint32_t write_Fifo(uint8_t dfifo, uint8_t *src, uint16_t len);
 
 /* Endpoint functions */
