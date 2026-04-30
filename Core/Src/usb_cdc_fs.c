@@ -1449,7 +1449,6 @@ void OTG_FS_IRQHandler(){
 	        	if (bcnt > 0)
 	        		read_Fifo(EpNum, bcnt);
 	        }
-
 	        // If pktsts is anything else (like Global OUT NAK), we've already popped it with the read of GRXSTSP, so we just move on.
 	    }
 	}

@@ -20,6 +20,7 @@
 #include <usb_cdc_fs.h>
 #include "myConfig.h"
 #include "timers.h"
+#include "cobs.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -60,9 +61,10 @@ uint32_t ct = 0;
 volatile uint8_t flag_canTx = 0;
 volatile uint32_t ep1_epena_status; // Use volatile so the debugger always sees the real value
 volatile int flagRx = 0; // 0 = no data, 1 = data arrived
-
+uint8_t ack_ok = 0;
 // Buffers
  uint8_t dest[USB_CDC_CIRC_BUFFER_SIZE] __attribute__ ((aligned (4))); // Align buffer 4-byte in RAM (or the memcpy and FIFO-write functions will be slower)
+ uint8_t dest2[32];
  circBufferAddress getData; // you can make it global for debug purposes
 
 /* USER CODE END PV */
@@ -73,8 +75,10 @@ static void MX_GPIO_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_RTC_Init(void);
 static void MX_USART3_UART_Init(void);
-/* USER CODE BEGIN PFP */
 
+/* USER CODE BEGIN PFP */
+void setCanSpeed(uint8_t sp);
+void setCanFilters(uint8_t *data);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -126,6 +130,102 @@ uint32_t USB_CDC_UserRxCallBack_EP1(uint16_t length){
 	return EP_OK;
 }
 
+void setCanSpeed(uint8_t sp) {
+	switch(sp) {
+	case 0x00: // 1000 kbps
+		hcan1.Init.Prescaler = 3;
+		hcan1.Init.TimeSeg1 = CAN_BS1_12TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+	break;case 0x01: // 800 kbps (actual: 803.57 kbps)
+		hcan1.Init.Prescaler = 4;
+		hcan1.Init.TimeSeg1 = CAN_BS1_11TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+		break;
+	case 0x02: // 500 kbps
+		hcan1.Init.Prescaler = 5;
+		hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+		break;
+	case 0x03: // 250 kbps
+		hcan1.Init.Prescaler = 10;
+		hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+		break;
+	case 0x04: // 125 kbps
+		hcan1.Init.Prescaler = 20;
+		hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+		break;
+	case 0x05: // 100 kbps
+		hcan1.Init.Prescaler = 25;
+		hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+		break;
+	case 0x06: // 50 kbps
+		hcan1.Init.Prescaler = 50;
+		hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
+		hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+		break;
+	default:
+		return;
+	}
+	// Restart with new baudrate
+	HAL_CAN_Stop(&hcan1);             // Take the node off the bus
+	if (HAL_CAN_Init(&hcan1) != HAL_OK)
+		Error_Handler(); // Initialization Error
+
+	// Send an Ack to confirm the command was executed
+	if(HAL_CAN_Start(&hcan1) == HAL_OK) {
+		uint8_t ack_can_speed[] = {0x01, 0xCF, 0x01}; // len = 1, 0xAF = can speed, 0x01 = ack
+		uint8_t txBuf[4];
+		cobs_encode_result cobs_res;
+		cobs_res = cobs_encode(&txBuf[1], 5, ack_can_speed, 3);  // Cobs-Encode starting at index 1 and up to 2 bytes for cobs overhead
+
+		if(cobs_res.status == COBS_ENCODE_OK) {
+			txBuf[0] = 0x00; // adding leading zero
+			txBuf[cobs_res.out_len + 1] = 0x00; // adding trailing zero
+			uint16_t total_to_send = cobs_res.out_len + 2;   // Total bytes to send: 1 (leading) + out_len + 1 (trailing)
+			USB_CDC_UserSend_Data(txBuf, total_to_send); // Transmit packet !
+		}
+	}
+}
+
+void setCanFilters(uint8_t *data) {
+	// we receive a packet of 6 bytes:  [LEN, CMD, ID_H, ID_L, MASK_H, MASK_L]
+	// data[0] = ID High Byte,  data[1] = ID Low Byte
+	// data[2] = Mask High Byte, data[3] = Mask Low Byte
+
+	uint32_t new_id = (data[2] << 8) | data[3];
+	uint32_t new_mask = (data[4] << 8) | data[5];
+
+	CAN_FilterTypeDef filtercfg;
+
+	filtercfg.FilterActivation = CAN_FILTER_ENABLE;
+	filtercfg.FilterBank = 0; // Let's just override Bank 0 for now
+	filtercfg.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+	filtercfg.FilterScale = CAN_FILTERSCALE_32BIT;
+	filtercfg.FilterMode = CAN_FILTERMODE_IDMASK;
+	// Apply the shifts:
+	filtercfg.FilterIdHigh = (uint16_t)(new_id << 5);
+	filtercfg.FilterIdLow = 0x0000;
+	filtercfg.FilterMaskIdHigh = (uint16_t)(new_mask << 5);
+	filtercfg.FilterMaskIdLow = 0x0000;
+
+	if(HAL_CAN_ConfigFilter(&hcan1, &filtercfg) == HAL_OK) {
+
+		uint8_t ack_can_filters[] = {0x01, 0xAF, 0x01}; // len = 1, 0xAF = CA filters, 0x01 = ack
+		uint8_t txBuf[4];
+		cobs_encode_result cobs_res;
+		cobs_res = cobs_encode(&txBuf[1], 5, ack_can_filters, 3);  // Cobs-Encode starting at index 1 and up to 2 bytes for cobs overhead
+
+		if(cobs_res.status == COBS_ENCODE_OK) {
+			txBuf[0] = 0x00; // adding leading zero
+			txBuf[cobs_res.out_len + 1] = 0x00; // adding trailing zero
+			uint16_t total_to_send = cobs_res.out_len + 2;   // Total bytes to send: 1 (leading) + out_len + 1 (trailing)
+			USB_CDC_UserSend_Data(txBuf, total_to_send); // Transmit packet !
+		}
+	}
+}
 
 /* USER CODE END 0 */
 
@@ -251,8 +351,12 @@ int main(void)
   TxHeader.RTR = 0;
   TxHeader.DLC = 4;
 
-
-
+  memset(dest, 0, 20); // we dont need to initialize the whole buffer (much faster)
+  cobs_encode_result cobs_res;
+  cobs_decode_result res_cobs;
+  // Allocate a buffer with space for: [Leading 0] + [COBS Data] + [Trailing 0]
+  uint8_t txBuf[32];   // Max COBS overhead for 20 bytes is 1 byte, so 20 + 1 + 2 = 23 bytes minimum
+  txBuf[0] = 0x00; // Leading delimiter
   //SysClockConfig();
   //GPIO_Config();
   //InterruptGPIO_Config();
@@ -267,18 +371,39 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  /* RECEIVE BYTES FROM PC */
 	  if (flagRx == 1) {
 		  flagRx = 0;
 		  GPIOD->ODR^=GPIO_ODR_OD4;
 		  getData = read_circBufferRx(512);
 		  if (getData.len == 0)
 			  break;
-		  memcpy(dest, &circBufferRx[getData.index], getData.len); // copy in intermediate buffer, must be identical
-		  if(USB_CDC_UserSend_Data(dest, getData.len) != EP_OK) // Echo data
-			  USB_CDC_UserSend_Data(dest, getData.len); // maybe try again (can loop perpetually if no counting limit)
+		  //memcpy(dest, &circBufferRx[getData.index], getData.len); // copy in intermediate buffer, must be identical
+
+		  uint8_t *cobs_data = &circBufferRx[getData.index + 1]; // index +1 : actual packet starts after the leading null delimiter
+		  size_t cobs_len = getData.len - 2; // len -2: two null delimiters
+		  /* decode directly */
+		  res_cobs = cobs_decode(dest, cobs_len, cobs_data, cobs_len); // for safety, since cobs_len is always > len of decoded packet
+
+		  // Follows the protocol packet (Length, Cmd=0xCF, Value)
+		  if(dest[0] == res_cobs.out_len - 1) { 	// check validity of length bit (LEN bit is not included in the actual length)
+			  switch(dest[1]) {
+			  case 0xCF: // a packet setting the speed was received
+				  setCanSpeed(dest[2]);
+				  break;
+			  case 0xAF: // a packet setting the speed was received: [LEN, CMD, ID_H, ID_L, MASK_H, MASK_L]
+				  setCanFilters(dest);
+				  break;
+			  default:
+				  return 0;
+			  }
+		  }
+		  //USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len); // Echo data
+
+//		  memset(dest, 0, 20);
+//		  memset(dest2, 0, 20);
 	  }
 
-	  //start = DWT->CYCCNT; // Start Measurement; polling = 1,223,027ns -
 	  //char arr1[4], arr2[4];
 	  uint16_t val[2], valAVG[2];
 	  val[0] = ((adc_buff[0] + 5) / 82); // sufficient once every 5ms
@@ -303,13 +428,13 @@ int main(void)
 				  TxHeader.StdId = 0x469;
 				  TxHeader.RTR = 0;
 				  TxHeader.DLC = 8;
-				  for(int i=0; i < 8; i++) { TxData[i] = valAVG[0]; }
+				  for(int i=0; i < 8; i++) { TxData[i] = valAVG[1] + 4*i; }
 			  }
 			  if(rightChg) {
 				  TxHeader.StdId = 0x470;
 				  TxHeader.RTR = 0;
 				  TxHeader.DLC = 8;
-				  for(int i=0; i < 8; i++){ TxData[i] = valAVG[1]; }
+				  for(int i=0; i < 8; i++){ TxData[i] = valAVG[1] + 4*i; }
 			  }
 		  }
 		  oldval[0] = valAVG[0];
@@ -318,33 +443,33 @@ int main(void)
 
 		  if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) == HAL_OK) {}
 
-		  char msg[20] = {0}; // Buffer for the string
-		  msg[0] = 0x02;
-		  // To send it "human-readable" over Uart:
-//		  int len = sprintf(msg, "RX ID: 0x%03lX DLC: %ld Data: ", RxHeader.StdId, RxHeader.DLC); // Format the Header info (ID and Data Length)
-//			  for (int i = 0; i < RxHeader.DLC; i++) {			// Append the Data bytes in Hex
-//				len += sprintf(msg + len, "%02X ", RxData[i]);
-//			  }
-		  memcpy(&msg[1], (uint8_t *)&(RxHeader.StdId), 2);
-		  memcpy(&msg[3], (uint8_t *)&(RxHeader.RTR), 1);
-		  memcpy(&msg[4], (uint8_t *)&RxHeader.DLC, 1);
-		  int len = RxHeader.DLC;
-		  memcpy(&msg[5], RxData, len);
-		  msg[5 + len] = 0x0A; // eof character (the "\n")
-		  //HAL_UART_Transmit(&huart3, (uint8_t *)msg, 6 + len, 2); //Transmit the whole string
 
 
-	  if(ct == 10 && flag_canTx == 1) {
-		  flag_canTx = 0;
-		 ct = 0;
 
-//		  if(USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len) == EP_OK) // Echo data
-//		  {  HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);  } // Green
-	  }
+		  if(ct == 2 && flag_canTx == 1) {
+			  flag_canTx = 0;
+			  ct = 0;
+			  // USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len); // without COBS
+			  char msg[20] = {0}; // Buffer for the packet to be encoded
 
-	  ct++;
+			  memcpy(&msg[0], (uint8_t *)&(RxHeader.StdId), 2);
+			  memcpy(&msg[2], (uint8_t *)&(RxHeader.RTR), 1);
+			  memcpy(&msg[3], (uint8_t *)&RxHeader.DLC, 1);
+			  int len = RxHeader.DLC;
+			  memcpy(&msg[4], RxData, len);
 
-	  NBdelay_ms(100);
+			  cobs_res = cobs_encode(&txBuf[1], sizeof(txBuf) - 1, msg, 5 + len);  // Cobs-Encode starting at index 1
+
+			  if(cobs_res.status == COBS_ENCODE_OK) {
+				  txBuf[0] = 0x00; // adding leading zero
+				  txBuf[cobs_res.out_len + 1] = 0x00; // adding trailing zero
+				  uint16_t total_to_send = cobs_res.out_len + 2;   // Total bytes to send: 1 (leading) + out_len + 1 (trailing)
+				  if(USB_CDC_UserSend_Data(txBuf, total_to_send) == EP_OK) // Transmit packet !
+					  HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);  // Green
+			  }
+		  }
+		  ct++;
+		  NBdelay_ms(100);
 
 
 	  /* USER CODE END WHILE */
