@@ -2,6 +2,7 @@
 /* Nicolas Prata 2026
  * For loopback mode, since Rx and Tx are only internally linked,
  * monitor Tx signal (PB9) at the logic analyser (Rx is still)
+ * Use Python file for interface monitor on PC
   ******************************************************************************
   * @file           : main.c
   * @brief          : Main program body
@@ -17,7 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "myFirst_adc.h"
-#include <usb_cdc_fs.h>
+#include "usb_cdc_fs.h"
 #include "myConfig.h"
 #include "timers.h"
 #include "cobs.h"
@@ -43,29 +44,12 @@ CAN_HandleTypeDef hcan1;
 
 RTC_HandleTypeDef hrtc;
 
-UART_HandleTypeDef huart3;
-
 /* USER CODE BEGIN PV */
-//
-CAN_TxHeaderTypeDef   TxHeader;
-uint8_t               TxData[8];
-uint32_t              TxMailbox;
-CAN_RxHeaderTypeDef   RxHeader;
-uint8_t               RxData[8];
-//
-uint16_t val[2], valAVG[2], avg1 = 0, avg2 = 0, oldval[2] ; // PV for pots 10K
-uint16_t adc_buff[2];
-uint8_t cntAVG = 0; // poti
-uint32_t start, duree_ns;
-uint32_t ct = 0;
+
+uint8_t RxData[8];
+CAN_RxHeaderTypeDef  RxHeader;
 volatile uint8_t flag_canTx = 0;
-volatile uint32_t ep1_epena_status; // Use volatile so the debugger always sees the real value
 volatile int flagRx = 0; // 0 = no data, 1 = data arrived
-uint8_t ack_ok = 0;
-// Buffers
- uint8_t dest[USB_CDC_CIRC_BUFFER_SIZE] __attribute__ ((aligned (4))); // Align buffer 4-byte in RAM (or the memcpy and FIFO-write functions will be slower)
- uint8_t dest2[32];
- circBufferAddress getData; // you can make it global for debug purposes
 
 /* USER CODE END PV */
 
@@ -74,7 +58,6 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_RTC_Init(void);
-static void MX_USART3_UART_Init(void);
 
 /* USER CODE BEGIN PFP */
 void setCanSpeed(uint8_t sp);
@@ -88,8 +71,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
 	/*	Once the interrupt occurs, the callback function HAL_CAN_RxFifo0MsgPendingCallback is called.
 		In this function, we retrieve the received message header and data, and perform further checks if required.
-	 */
-	//GPIOD->ODR^=GPIO_ODR_OD4; // orange
+	*/
 	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) flag_canTx = 1;
 	else {
 		flag_canTx = 0;
@@ -98,13 +80,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 }
 
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan) {
-
     // Process "Priority" messages here
 }
 
-void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
-{
-	HAL_UART_Transmit(&huart3, (uint8_t *)"error", 6, 10);
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan){
+
     uint32_t error = HAL_CAN_GetError(hcan);
 	 HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_4);
     // 1. Check for ACK Error (Most common)
@@ -124,13 +104,16 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     }
 }
 
-uint32_t USB_CDC_UserRxCallBack_EP1(uint16_t length){
-
-	flagRx = 1; // flag is raised when bytes are received
+uint32_t USB_CDC_UserRxCallBack_EP1(uint16_t length)
+{
+	flagRx = 1; // flag is raised when USB_CDC bytes are received
 	return EP_OK;
 }
 
 void setCanSpeed(uint8_t sp) {
+
+	HAL_CAN_Stop(&hcan1); // Take the node off the bus
+
 	switch(sp) {
 	case 0x00: // 1000 kbps
 		hcan1.Init.Prescaler = 3;
@@ -169,8 +152,8 @@ void setCanSpeed(uint8_t sp) {
 	default:
 		return;
 	}
+
 	// Restart with new baudrate
-	HAL_CAN_Stop(&hcan1);             // Take the node off the bus
 	if (HAL_CAN_Init(&hcan1) != HAL_OK)
 		Error_Handler(); // Initialization Error
 
@@ -238,21 +221,19 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
 
-	// Initialization
-//	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-//	DWT->CYCCNT = 0;
-//	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+	CAN_TxHeaderTypeDef   TxHeader;
+	uint8_t               TxData[8];
+	uint32_t              TxMailbox;
 
-//	TxHeader.IDE = CAN_ID_STD;
-//	TxHeader.StdId = 0x469;
-	TxHeader.RTR = CAN_RTR_DATA;
-//	TxHeader.DLC = 3;
-//
-//	TxData[0] = 0x50;
-//	TxData[1] = 0xAA;
-//	TxData[2] = 0x86;
+	//
+	uint16_t avg1 = 0, avg2 = 0, oldval[2] ; // PV for pots 10K
+	uint16_t adc_buff[2];
+	uint8_t cntAVG = 0; // poti
+	uint32_t ct = 0;
 
-
+	// Buffers (global for debugging)
+	 uint8_t dest[USB_CDC_CIRC_BUFFER_SIZE] __attribute__ ((aligned (4))); // Align buffer 4-byte in RAM (or the memcpy and FIFO-write functions will be slower)
+	 circBufferAddress getData; // you can make it global for debug purposes
 
   /* USER CODE END 1 */
 
@@ -276,11 +257,16 @@ int main(void)
   MX_GPIO_Init();
   MX_CAN1_Init();
   MX_RTC_Init();
-  //MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  if(USB_OTG_FS_Init() != EP_OK) // Initialize the bare metal USB CDC driver
+	  return -1;
 
-	/**** ADC INIT FOR SENSORS AND POTS ****/
+  TxHeader.StdId = 0x470;
+  TxHeader.RTR = CAN_RTR_DATA;
+  TxHeader.DLC = 4;
+
+  /**** ADC INIT FOR SENSORS AND POTS ****/
   ADC1_Base_Init(); // Init the ADC for stm sensors and the two pots
   ADC1_Potentiometers_DMA_Init((uint32_t )&ADC1->DR, (uint32_t)adc_buff, 2); //  (uint32_t)adc_buff -> do it better
   HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_6);
@@ -297,8 +283,7 @@ int main(void)
   filtercfg.FilterFIFOAssignment = CAN_FILTER_FIFO0; // decide which FIFO (FIFO0 or FIFO1) will store received messages (related interrupt is enabled)
   filtercfg.FilterScale = CAN_FILTERSCALE_32BIT; // use either one 32-bit register or two 16-bit registers.
   filtercfg.FilterMode = CAN_FILTERMODE_IDMASK;
-  // In Mask mode, FilterIdHigh is the Target ID. It defines what the bits should look like. The FilterMaskIdHigh then defines which of those bits are mandatory.
-  // It List Mode, it is simply ID #1. In this mode, there is no mask. FilterIdHigh is the first ID you want to allow, and FilterMaskIdHigh is actually a second ID you want to allow.
+
   filtercfg.FilterIdHigh = 0; // 0x446 << 5 Holds the upper 16 bits of the filter. In 32-bit Filter Mode, the first 5 bits of that register are used for RTR, IDE, etc.
   filtercfg.FilterIdLow = 0;
   filtercfg.FilterMaskIdHigh = 0; // define which ID bits to compare (e.g., shift the STD ID by 5 because it starts at bit 5).
@@ -316,40 +301,31 @@ int main(void)
   filtercfg.FilterMaskIdLow = 0x0000;
   HAL_CAN_ConfigFilter(&hcan1, &filtercfg);
 
-  /*1. In Mask Mode (Identifier Mask)
+  /*
+  1. In Mask Mode (Identifier Mask)
   This is the default for most people. Here, FilterIdHigh is the Target, and FilterMaskIdHigh is the Constraint.
       FilterIdHigh: "I am looking for 0x123."
       FilterMaskIdHigh: "I want you to check every single bit of that ID (0x7FF)."
       Result: You get exactly one ID.
-
   2. In List Mode (Identifier List)
   In this mode, there is no mask. The hardware stops acting like a "bit-checker" and starts acting like a "phone book." It treats both registers as independent IDs.
       FilterIdHigh: "Accept ID 0x123."
       FilterMaskIdHigh: "Also accept ID 0x456."
       Result: You get two specific IDs per filter bank, but you have no way to use a "wildcard" (mask) to catch a range.
-
-  Why the naming is confusing
+  3. Why the naming is confusing
   The HAL uses the variable name FilterMaskIdHigh regardless of which mode you are in.
       In Mask Mode, that variable is a bit-mask.
-      In List Mode, that variable is actually a second ID.
-
-  How to decide which to use?
-  If you want to...	Use this Mode	Setup
-  Catch one specific ID	Mask Mode	ID = 0x123, Mask = 0x7FF
-  Catch a group of IDs (e.g., 0x100 to 0x10F)	Mask Mode	ID = 0x100, Mask = 0xFF0
-  Catch two unrelated IDs in one bank	List Mode	ID1 = 0x123, ID2 = 0x456*/
+      In List Mode, that variable is actually a second ID. */
 
   HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
 
-  // 1. Start the CAN peripheral - This moves it from INIT to NORMAL mode
+  // Start the CAN peripheral - This moves it from INIT to NORMAL mode
   if (HAL_CAN_Start(&hcan1) != HAL_OK)
   {
 	  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_4);
 	  Error_Handler();
   }
-  TxHeader.StdId = 0x470;
-  TxHeader.RTR = 0;
-  TxHeader.DLC = 4;
+
 
   memset(dest, 0, 20); // we dont need to initialize the whole buffer (much faster)
   cobs_encode_result cobs_res;
@@ -357,13 +333,8 @@ int main(void)
   // Allocate a buffer with space for: [Leading 0] + [COBS Data] + [Trailing 0]
   uint8_t txBuf[32];   // Max COBS overhead for 20 bytes is 1 byte, so 20 + 1 + 2 = 23 bytes minimum
   txBuf[0] = 0x00; // Leading delimiter
-  //SysClockConfig();
-  //GPIO_Config();
-  //InterruptGPIO_Config();
 
-  if(USB_OTG_FS_Init() != EP_OK) return -1;
-
-  HAL_Delay(5000); //Delay wait for USB detection by Host
+  HAL_Delay(1000); //Delay wait for USB detection by Host
 
   /* USER CODE END 2 */
 
@@ -378,7 +349,6 @@ int main(void)
 		  getData = read_circBufferRx(512);
 		  if (getData.len == 0)
 			  break;
-		  //memcpy(dest, &circBufferRx[getData.index], getData.len); // copy in intermediate buffer, must be identical
 
 		  uint8_t *cobs_data = &circBufferRx[getData.index + 1]; // index +1 : actual packet starts after the leading null delimiter
 		  size_t cobs_len = getData.len - 2; // len -2: two null delimiters
@@ -391,7 +361,7 @@ int main(void)
 			  case 0xCF: // a packet setting the speed was received
 				  setCanSpeed(dest[2]);
 				  break;
-			  case 0xAF: // a packet setting the speed was received: [LEN, CMD, ID_H, ID_L, MASK_H, MASK_L]
+			  case 0xAF: // a packet setting the filter was received: [LEN, CMD, ID_H, ID_L, MASK_H, MASK_L]
 				  setCanFilters(dest);
 				  break;
 			  default:
@@ -399,12 +369,8 @@ int main(void)
 			  }
 		  }
 		  //USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len); // Echo data
-
-//		  memset(dest, 0, 20);
-//		  memset(dest2, 0, 20);
 	  }
 
-	  //char arr1[4], arr2[4];
 	  uint16_t val[2], valAVG[2];
 	  val[0] = ((adc_buff[0] + 5) / 82); // sufficient once every 5ms
 	  val[1] = ((adc_buff[1] + 5) / 82);
@@ -421,10 +387,7 @@ int main(void)
 
 		  if(leftChg || rightChg)
 		  {
-			  //arr1[2] = 0; arr2[2] = 0;
-			  //int len1 = 0; int len2 = 0;
 			  if(leftChg) {
-
 				  TxHeader.StdId = 0x469;
 				  TxHeader.RTR = 0;
 				  TxHeader.DLC = 8;
@@ -443,14 +406,9 @@ int main(void)
 
 		  if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) == HAL_OK) {}
 
-
-
-
-		  if(ct == 2 && flag_canTx == 1) {
-			  flag_canTx = 0;
-			  ct = 0;
-			  // USB_CDC_UserSend_Data((uint8_t *)msg, 6 + len); // without COBS
-			  char msg[20] = {0}; // Buffer for the packet to be encoded
+		  if(ct == 40 && flag_canTx == 1) {
+			  flag_canTx = 0, ct = 0;
+			  char msg[20];
 
 			  memcpy(&msg[0], (uint8_t *)&(RxHeader.StdId), 2);
 			  memcpy(&msg[2], (uint8_t *)&(RxHeader.RTR), 1);
@@ -469,7 +427,7 @@ int main(void)
 			  }
 		  }
 		  ct++;
-		  NBdelay_ms(100);
+		  NBdelay_ms(25);
 
 
 	  /* USER CODE END WHILE */
@@ -642,38 +600,7 @@ static void MX_RTC_Init(void)
 
 }
 
-/**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART3_UART_Init(void)
-{
 
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
-
-}
 
 /**
   * @brief GPIO Initialization Function

@@ -1,3 +1,4 @@
+# CAN bus interface CAN bus 2.0A Monitoring Interface (working draft, project for STM32F469)
 
 import dearpygui.dearpygui as dpg
 import errno # The errno module maps error numbers to symbolic names for OS-related errors.
@@ -16,9 +17,6 @@ WIDTH_DPG_WIN = 800
 HEIGHT_DPG_WIN = 700
 PADDING_R_LIST_PORTS = 50
 CAN_SPEEDS = ["1000 kbps", "800 kbps", "500 kbps", "250 kbps", "125 kbps", "100 kbps", "50 kbps"] # Common speeds
-
-# --- Connection Settings ---
-# PORT = 'COM17'       # The address of your STM32 (check Device Manager)
 BAUD = 115200       # Bits per second; must match your STM32 HAL_UART_Init
 
 class STM32Monitor:
@@ -42,7 +40,7 @@ class STM32Monitor:
         self.table_theme = CAN_Stm32_GUI.theme_table()
         self.error_theme = CAN_Stm32_GUI.theme_error()
     
-        # --- Viewport autocenter: get screen size ---
+        # Viewport autocenter: get screen size
         root = tk.Tk()
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
@@ -59,9 +57,8 @@ class STM32Monitor:
                 dpg.bind_item_font(header, self.fonts["M"])                              
                 dpg.add_spacer(width=60)
 
-                # --- COM ports dropdown menu ---
-                # Helper function to avoid error when result is None with simple inline instruction (None.group(1) crashes the script)
-                def get_com_number(item): 
+                # --- COM ports dropdown menu ---             
+                def get_com_number(item):   # Helper function to avoid error when result is None with simple inline instruction
                     # Sort: we split by 'COM', then take the part after it, then split by ' ' (to remove the description) and convert to int
                     match = re.search(r'COM(\d+)', item)  # Logic: "COM17 - Desc" -> "17 - Desc" -> "17" -> 17
                     if match:
@@ -212,9 +209,8 @@ class STM32Monitor:
         x_start_pos = WIDTH_DPG_WIN - width - PADDING_R_LIST_PORTS # calculate the x_pos to get constant padding on the right
         dpg.configure_item("port_dropdown", pos=[x_start_pos, 12])        
 
-    def on_port_select(self, sender, app_data):       
-        # Extract just "COMx" from "COMx - Description"       
-        self.selected_port = app_data.split(" ")[0]
+    def on_port_select(self, sender, app_data):              
+        self.selected_port = app_data.split(" ")[0]   # Extract just "COMx" from "COMx - Description" 
         print(f"Port set to: {self.selected_port}")
     
     def update_can_speed(self, sender, app_data):      
@@ -284,7 +280,6 @@ class STM32Monitor:
         try:
             with serial.Serial(self.selected_port, BAUD, timeout=0.1, dsrdtr=False) as ser: 
     
-                # --- START OF SESSION INITIALIZATION ---
                 # The port is now OPEN. We can safely send the speed packet.
          
                 self.handshake_done = False        # RESET state for new connection
@@ -301,7 +296,7 @@ class STM32Monitor:
                     # the subsequent read(4) and read(dlc+1) have plenty of time to wait for the remaining bytes to arrive if there is a slight delay.
                     # Speed: You aren't stuck waiting for that timeout when the line is idle. The in_waiting check is near-instant at the hardware driver level.
                     
-                    # --- 1. THE SILENT TIMER CHECK ---
+                    # --- THE SILENT TIMER CHECK ---
                     # This runs every loop, even if no data has arrived yet
                     if not self.handshake_done:
                         if (time.time() - start_time) > 2.0:
@@ -325,12 +320,10 @@ class STM32Monitor:
                         time.sleep(0.001) # Breathe for 1ms, during this time the incoming bytes are bufferized by the hardware
                         continue          # (and USB driver) so nothing will be lost - the bucket usually holds 4,096 bytes or more
                                           # Also slows down the loop and prevent it to run millions of times per second
-                    # --- RECEPTION ---                    
-                    # No need for "if ser.in_waiting > 0:" because read() already waits for bytes
-                    # readline() is not used since it detects the first 0x0A and it can be a data
-                      # --- RECEPTION (COBS Style) ---
-                # Read all currently available bytes
-                    data_in = ser.read(ser.in_waiting)
+                                  
+                    # No need for "if ser.in_waiting > 0:" because read() already waits for bytes                   
+                    # --- RECEPTION (COBS Style) ---                 
+                    data_in = ser.read(ser.in_waiting)    # Read all currently available bytes
                     if data_in:
                          # Iterates through data_in and adds each byte 1 by 1 to the end of the bytearray buffer
                         buffer.extend(data_in) # not mandatory (USB packets arrive always in one piece)
@@ -347,7 +340,7 @@ class STM32Monitor:
                                 continue # Ignore empty chunks from leading/double zeros
 
                             try:                                
-                                decoded_msg = cobs.decode(packet_chunk)  # STEP 1: Decode COBS     
+                                decoded_msg = cobs.decode(packet_chunk)  # Decode COBS     
 
                                 # process ACK (CAN speed - handshake) packet: [0x01 (LEN), 0xCF (CMD), 0x01 (STATUS)]
                                 if not self.handshake_done:
@@ -371,7 +364,7 @@ class STM32Monitor:
                                     self.err_frames += 1
                                     continue                                
                                                                
-                                # STEP 2: Process the decoded_msg (which is your original 'msg')
+                                # Process the decoded_msg
                                 # using int.from_bytes and simple list slicing (above), Python will handle this extremely quickly                              
                                 can_id = int.from_bytes(decoded_msg[0:2], byteorder='little') # StdId
                                 rtr = decoded_msg[2] # RTR
@@ -417,9 +410,8 @@ class STM32Monitor:
             dpg.set_value("state_handshake2", "")                   
 
     def send_command(self, sender, app_data):
-        # Example: Sending a sync command or LED toggle
-        # Wrap your data in a bytes object
-        command = b'\x02\x03\x04\x05\x0A' # Example byte sequence
+        # Example: Sending a random command     
+        command = b'\x02\x03\x04\x05\x0A' # Wrap your data in a bytes object
         self.tx_queue.put(command)
 
     def process_queue(self):
